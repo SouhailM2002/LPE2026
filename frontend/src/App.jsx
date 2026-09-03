@@ -80,6 +80,12 @@ function buildDashboardData(summary, rows) {
   const worstTestTime = summary.worstTestTime ?? 0
   const worstTestTimeCount = summary.worstTestTimeCount || 0
   const worstTestTimePercent = summary.worstTestTimePercent ?? 0
+  const blankLineCount = summary.blankLineCount ?? 0
+  const retestCount = summary.retestCount ?? 0
+  const retestPassedCount = summary.retestPassedCount ?? 0
+  const retestFailedCount = summary.retestFailedCount ?? 0
+  const retestPassedRate = summary.retestPassedRate ?? 0
+  const retestFailedRate = summary.retestFailedRate ?? 0
   const topValidationAttempts = Array.isArray(summary.topValidationAttempts)
     ? summary.topValidationAttempts
     : []
@@ -95,6 +101,8 @@ function buildDashboardData(summary, rows) {
     ? failureBreakdown.map((item, index) => ({
         name: item.name,
         value: item.value,
+        uniqueCards: item.uniqueCards || 0,
+        cardFailures: item.cardFailures || {},
         pace: `${Math.max(1, Math.round((item.value / Math.max(failedBoards, 1)) * 100))}%`,
         color: ['#3b82f6', '#10b981', '#a78bfa', '#f59e0b', '#ef4444'][index] || '#3b82f6',
       }))
@@ -114,15 +122,12 @@ function buildDashboardData(summary, rows) {
     { label: 'Average test time', value: formatDuration(averageTestTime), delta: `${formatNumber(totalBoards)} cards` },
     { label: 'Best time', value: formatDuration(bestTestTime), delta: `${formatNumber(bestTestTimeCount)} cards / ${Math.round(bestTestTimePercent)}%` },
     { label: 'Worst time', value: formatDuration(worstTestTime), delta: `${formatNumber(worstTestTimeCount)} cards / ${Math.round(worstTestTimePercent)}%` },
-    { label: 'Coverage', value: `${Math.round(coverageRate)}%`, delta: `${formatNumber(summary.notTestedTests || 0)} not tested` },
-    { label: 'Critical tests', value: formatNumber(uniqueFailureTests), delta: `${formatNumber(failureBreakdown.length)} tracked` },
+    { label: 'Blank lines', value: formatNumber(blankLineCount), delta: 'empty CSV lines' },
   ]
 
   const operations = [
-    { name: 'Pass rate', value: Math.min(100, Math.round(passRate)), tone: 'ok' },
-    { name: 'Fail rate', value: Math.min(100, Math.round(failRate)), tone: 'warn' },
-    { name: 'Coverage', value: Math.min(100, Math.round(coverageRate)), tone: 'neutral' },
-    { name: 'Critical tests', value: Math.min(100, Math.round((uniqueFailureTests / Math.max(totalBoards, 1)) * 100)), tone: 'warn' },
+    { name: 'Retest passed', value: Math.min(100, Math.round(retestPassedRate)), tone: retestPassedCount > 0 ? 'ok' : 'neutral' },
+    { name: 'Retest failed', value: Math.min(100, Math.round(retestFailedRate)), tone: retestFailedCount > 0 ? 'warn' : 'neutral' },
   ]
 
   const channelMix = [
@@ -131,26 +136,35 @@ function buildDashboardData(summary, rows) {
     { name: 'Untested', value: Math.max(0, Math.round(untestedRate)), color: '#f59e0b' },
   ]
 
-  const trend = Array.from({ length: 7 }, (_, index) => {
-    const baseValue = Math.max(15, Math.min(100, passRate + ((index - 3) * 5)))
-    const variability = ((index + 1) % 2 === 0 ? 1 : -1) * (failRate * 0.35)
-    const value = Math.max(10, Math.min(100, baseValue + variability))
+  const statusRows = rows
+    .filter((row) => String(row.NS || '').trim() !== '')
+    .map((row) => String(row['Status Carte'] || '').trim().toUpperCase())
+    .filter((status) => status === 'OK' || status === 'NOK' || status === 'FAIL')
 
-    return {
+  const batchSize = Math.max(1, Math.ceil(statusRows.length / 8))
+  const healthPulse = []
+
+  for (let index = 0; index < statusRows.length; index += batchSize) {
+    const batch = statusRows.slice(index, index + batchSize)
+    const passed = batch.filter((status) => status === 'OK').length
+    const value = Math.round((passed / batch.length) * 100)
+    healthPulse.push({
       value,
-    }
-  })
-
-  const trendPoints = trend
-    .map((point, index) => {
-      const x = 25 + (index * 46)
-      const y = 130 - (point.value / 100) * 92
-      return `${x},${y}`
+      passed,
+      failed: batch.length - passed,
+      label: `${index + 1}`,
+      status: value >= 80 ? 'healthy' : value >= 60 ? 'warning' : 'risk',
     })
-    .join(' ')
+  }
 
-  const areaPoints = `${trendPoints} 295,130 25,130`
-  const currentTrendValue = Math.round(trend[trend.length - 1].value)
+  if (healthPulse.length === 0) {
+    healthPulse.push({ value: 0, passed: 0, failed: 0, label: '—', status: 'risk' })
+  }
+
+  const overallHealth = Math.round(
+    healthPulse.reduce((total, point) => total + point.value, 0) / healthPulse.length,
+  )
+  const currentTrendValue = overallHealth
   const currentTrendStatus = currentTrendValue >= 80 ? 'Healthy' : currentTrendValue >= 60 ? 'Warning' : 'Risk'
 
   const totalDistribution = channelMix.reduce((sum, channel) => sum + (Number(channel.value) || 0), 0)
@@ -170,9 +184,7 @@ function buildDashboardData(summary, rows) {
   return {
     stats,
     topProducts,
-    trend,
-    trendPoints,
-    areaPoints,
+    healthPulse,
     currentTrendValue,
     currentTrendStatus,
     channelMix,
@@ -195,6 +207,7 @@ function App() {
   const [file, setFile] = useState(null)
   const [summary, setSummary] = useState(null)
   const [rows, setRows] = useState([])
+  const [selectedFailureTest, setSelectedFailureTest] = useState(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
   const [mongoStatus, setMongoStatus] = useState('Checking...')
@@ -204,6 +217,17 @@ function App() {
   useEffect(() => {
     setMongoStatus('Waiting for upload')
   }, [])
+
+  useEffect(() => {
+    if (!selectedFailureTest) return undefined
+
+    const handleKeyDown = (event) => {
+      if (event.key === 'Escape') setSelectedFailureTest(null)
+    }
+
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [selectedFailureTest])
 
   const handleUpload = async (event) => {
     event.preventDefault()
@@ -336,12 +360,34 @@ function App() {
               <li key={product.name}>
                 <div className="product-info">
                   <span className="mini-bar" style={{ background: product.color }} />
-                  <span>{product.name}</span>
+                  <div className="product-details">
+                    <span className="product-name">{product.name}</span>
+                    <small className="unique-cards">{product.uniqueCards} unique card{product.uniqueCards !== 1 ? 's' : ''}</small>
+                  </div>
                 </div>
                 <div className="product-meta">
                   <strong>{formatNumber(product.value)}</strong>
                   <small>{product.pace}</small>
                 </div>
+                {Object.keys(product.cardFailures).length > 0 && (
+                  <div className="card-failures">
+                    {Object.entries(product.cardFailures).slice(0, 3).map(([ns, count]) => (
+                      <div key={ns} className="failure-detail">
+                        <span className="failure-ns">{ns}</span>
+                        <span className="failure-count">{count}x</span>
+                      </div>
+                    ))}
+                    {Object.keys(product.cardFailures).length > 3 && (
+                      <button
+                        type="button"
+                        className="failure-more"
+                        onClick={() => setSelectedFailureTest(product)}
+                      >
+                        +{Object.keys(product.cardFailures).length - 3} more
+                      </button>
+                    )}
+                  </div>
+                )}
               </li>
             ))}
           </ul>
@@ -423,7 +469,7 @@ function App() {
           <div className="panel-header">
             <div>
               <span className="panel-label">Attempt count</span>
-              <h3>Top 5 cards with most attempts</h3>
+              <h3>Top 10 cards with most attempts</h3>
             </div>
           </div>
 
@@ -449,11 +495,11 @@ function App() {
             </div>
           </div>
 
-          <div className="line-chart-wrap" aria-label="Card health trend chart">
+          <div className="line-chart-wrap" aria-label="Card health pulse chart">
             <div className="trend-header">
               <div className="trend-total">
                 <strong>{dashboardData.currentTrendValue}%</strong>
-                <span>Current health</span>
+                <span>Overall health</span>
               </div>
 
               <span className={`status-badge ${dashboardData.currentTrendStatus.toLowerCase()}`}>
@@ -461,28 +507,29 @@ function App() {
               </span>
             </div>
 
-            <svg viewBox="0 0 320 160" className="trend-svg" role="img" aria-label="Health trend line chart">
-              <defs>
-                <linearGradient id="trendFill" x1="0" x2="0" y1="0" y2="1">
-                  <stop offset="0%" stopColor="rgba(37, 99, 235, 0.30)" />
-                  <stop offset="100%" stopColor="rgba(37, 99, 235, 0.02)" />
-                </linearGradient>
-              </defs>
+            <div className="pulse-chart" role="img" aria-label="Health pulse by recent batch">
+              <div className="pulse-scale" aria-hidden="true"><span>100</span><span>50</span><span>0</span></div>
+              <div className="pulse-grid">
+                {[100, 50, 0].map((value) => <span key={value} style={{ bottom: `${value}%` }} />)}
+                {dashboardData.healthPulse.map((point) => (
+                  <div className="pulse-column" key={`pulse-${point.label}`}>
+                    <div className="pulse-bar-track">
+                      <div className={`pulse-bar ${point.status}`} style={{ height: `${Math.max(point.value, 5)}%` }}>
+                        <span>{point.value}%</span>
+                      </div>
+                    </div>
+                    <small>B{point.label}</small>
+                    <em>{point.passed}/{point.passed + point.failed}</em>
+                  </div>
+                ))}
+              </div>
+            </div>
 
-              {[0, 25, 50, 75, 100].map((gridValue) => {
-                const y = 130 - (gridValue / 100) * 92
-                return <line key={gridValue} x1="25" x2="295" y1={y} y2={y} className="trend-grid" />
-              })}
-
-              <polygon points={dashboardData.areaPoints} className="trend-area" />
-              <polyline points={dashboardData.trendPoints} className="trend-line" />
-
-              {dashboardData.trend.map((point, index) => {
-                const x = 25 + (index * 46)
-                const y = 130 - (point.value / 100) * 92
-                return <circle key={`trend-point-${index}`} cx={x} cy={y} r="4.3" className="trend-dot" />
-              })}
-            </svg>
+            <div className="pulse-legend">
+              <span><i className="legend-ok" /> Healthy batch</span>
+              <span><i className="legend-warn" /> Watch batch</span>
+              <span><i className="legend-risk" /> Risk batch</span>
+            </div>
 
           </div>
         </article>
@@ -490,7 +537,7 @@ function App() {
         <article className="panel operations-panel">
           <div className="panel-header">
             <div>
-              <span className="panel-label">Quality checks</span>
+              <span className="panel-label">Retest Outcome</span>
               <h3>Health</h3>
             </div>
           </div>
@@ -540,6 +587,41 @@ function App() {
           </div>
         </article>
       </section>
+
+      {selectedFailureTest && (
+        <div className="failure-modal-backdrop" onClick={() => setSelectedFailureTest(null)}>
+          <section
+            className="failure-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="failure-modal-title"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="failure-modal-header">
+              <div>
+                <span className="panel-label">Additional failed cards</span>
+                <h3 id="failure-modal-title">{selectedFailureTest.name}</h3>
+              </div>
+              <button
+                type="button"
+                className="modal-close"
+                aria-label="Close failed cards window"
+                onClick={() => setSelectedFailureTest(null)}
+              >
+                ×
+              </button>
+            </div>
+            <div className="failure-modal-list">
+              {Object.entries(selectedFailureTest.cardFailures).slice(3).map(([ns, count]) => (
+                <div key={ns} className="failure-modal-item">
+                  <span>{ns}</span>
+                  <strong>{count}x</strong>
+                </div>
+              ))}
+            </div>
+          </section>
+        </div>
+      )}
     </div>
   )
 }

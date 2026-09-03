@@ -111,10 +111,11 @@ function buildFailureBreakdown(rows) {
   const testColumns = keys.filter((key) => !metadataKeys.has(String(key).trim().toUpperCase()));
 
   const failureCounts = {};
+  const failureDetails = {};
 
   validRows.forEach((row) => {
     let rowFirstFailureName = null;
-
+    const ns = normalizeBoardIdValue(row);
     for (const key of testColumns) {
       const status = normalizeCellStatus(row[key]);
 
@@ -126,6 +127,12 @@ function buildFailureBreakdown(rows) {
         if (!rowFirstFailureName) {
           rowFirstFailureName = key;
           failureCounts[key] = (failureCounts[key] || 0) + 1;
+          
+          if (!failureDetails[key]) {
+            failureDetails[key] = { uniqueCards: new Set(), cardFailures: {} };
+          }
+          failureDetails[key].uniqueCards.add(ns);
+          failureDetails[key].cardFailures[ns] = (failureDetails[key].cardFailures[ns] || 0) + 1;
         }
         break;
       }
@@ -135,7 +142,12 @@ function buildFailureBreakdown(rows) {
   return Object.entries(failureCounts)
     .sort((a, b) => b[1] - a[1])
     .slice(0, 6)
-    .map(([name, count]) => ({ name, value: count }));
+    .map(([name, count]) => ({ 
+      name, 
+      value: count,
+      uniqueCards: Array.from(failureDetails[name].uniqueCards).length,
+      cardFailures: failureDetails[name].cardFailures,
+    }));
 }
 
 function analyzeBoardTestResults(rows) {
@@ -390,7 +402,7 @@ function buildAttemptStats(rows, { onlyValidated = false } = {}) {
     }))
     .filter((entry) => !onlyValidated || entry.finalStatus === 'OK')
     .sort((a, b) => b.attempts - a.attempts || a.ns.localeCompare(b.ns))
-    .slice(0, 5);
+    .slice(0, 10);
 
   return stats;
 }
@@ -428,6 +440,70 @@ function isBoardValidatedFromFirstTry(row) {
   return true;
 }
 
+function calculateRetestOutcome(rows) {
+  if (!Array.isArray(rows) || rows.length === 0) {
+    return {
+      retestCount: 0,
+      retestPassedCount: 0,
+      retestFailedCount: 0,
+      retestPassedRate: 0,
+      retestFailedRate: 0,
+    };
+  }
+
+  // Group rows by card ID to track all attempts
+  const cardAttempts = new Map();
+  
+  rows.forEach((row) => {
+    const cardId = normalizeBoardIdValue(row);
+    if (!cardId) return;
+
+    if (!cardAttempts.has(cardId)) {
+      cardAttempts.set(cardId, []);
+    }
+    cardAttempts.get(cardId).push(row);
+  });
+
+  // Find cards that were retested (multiple attempts)
+  let retestCount = 0;
+  let retestPassedCount = 0;
+  let retestFailedCount = 0;
+
+  cardAttempts.forEach((attempts, cardId) => {
+    // Only consider cards with 2+ attempts
+    if (attempts.length < 2) return;
+
+    // Check if first attempt failed
+    const firstAttempt = attempts[0];
+    const firstStatus = String(firstAttempt['Status Carte'] || '').trim().toUpperCase();
+    
+    // Only count as "retest" if first attempt was not OK
+    if (firstStatus === 'OK') return;
+
+    // Check final attempt outcome
+    const lastAttempt = attempts[attempts.length - 1];
+    const finalStatus = String(lastAttempt['Status Carte'] || '').trim().toUpperCase();
+
+    retestCount += 1;
+    if (finalStatus === 'OK') {
+      retestPassedCount += 1;
+    } else {
+      retestFailedCount += 1;
+    }
+  });
+
+  const retestPassedRate = retestCount > 0 ? (retestPassedCount / retestCount) * 100 : 0;
+  const retestFailedRate = retestCount > 0 ? (retestFailedCount / retestCount) * 100 : 0;
+
+  return {
+    retestCount,
+    retestPassedCount,
+    retestFailedCount,
+    retestPassedRate,
+    retestFailedRate,
+  };
+}
+
 function calculateSummary(rows) {
   if (!Array.isArray(rows) || rows.length === 0) {
     return {
@@ -460,6 +536,11 @@ function calculateSummary(rows) {
       worstTestTime: 0,
       worstTestTimeCount: 0,
       worstTestTimePercent: 0,
+      retestCount: 0,
+      retestPassedCount: 0,
+      retestFailedCount: 0,
+      retestPassedRate: 0,
+      retestFailedRate: 0,
     };
   }
 
@@ -568,6 +649,8 @@ function calculateSummary(rows) {
     });
   }
 
+  const retestOutcome = calculateRetestOutcome(validRows);
+
   return {
     ...passFailMetrics,
     ...timeMetrics,
@@ -582,6 +665,7 @@ function calculateSummary(rows) {
     firstTryValidatedBoards,
     topValidationAttempts,
     topAttemptCards,
+    ...retestOutcome,
   };
 }
 
@@ -618,13 +702,14 @@ function splitCsvLine(line, delimiter) {
 
 function parseCsvFile(filePath) {
   const rawContent = fs.readFileSync(filePath, 'utf8').replace(/\uFEFF/g, '');
-  const lines = rawContent
-    .split(/\r?\n/)
-    .map((line) => line.trimEnd())
-    .filter((line) => line.trim() !== '');
+  const allLines = rawContent.split(/\r\n|\r|\n/)
+  if (allLines[allLines.length - 1] === '') {
+    allLines.pop()
+  }
+  const lines = allLines.filter((line) => line.trim() !== '')
 
   if (lines.length === 0) {
-    return [];
+    return { rows: [], blankLineCount }
   }
 
   const firstLine = lines[0];
@@ -634,16 +719,20 @@ function parseCsvFile(filePath) {
 
   const headers = splitCsvLine(firstLine, delimiter).map((header) => header.trim());
 
-  return lines.slice(1).map((line) => {
-    const values = splitCsvLine(line, delimiter);
-    const row = {};
+  const rows = lines.slice(1).map((line) => {
+    const values = splitCsvLine(line, delimiter)
+    const row = {}
 
     headers.forEach((header, index) => {
-      row[header] = values[index] !== undefined ? values[index] : '';
-    });
+      row[header] = values[index] !== undefined ? values[index] : ''
+    })
 
-    return row;
-  });
+    return row
+  })
+
+  const blankLineCount = rows.filter((row) => normalizeBoardIdValue(row) === '').length
+
+  return { rows, blankLineCount }
 }
 
 const upload = multer({
@@ -675,10 +764,11 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
   const filePath = req.file.path;
 
   try {
-    const parsedRows = parseCsvFile(filePath);
-    fs.unlinkSync(filePath);
+    const { rows: parsedRows, blankLineCount } = parseCsvFile(filePath)
+    fs.unlinkSync(filePath)
 
-    const summary = calculateSummary(parsedRows);
+    const summary = calculateSummary(parsedRows)
+    summary.blankLineCount = blankLineCount
     inMemoryRecords = parsedRows;
     inMemorySummary = summary;
 
