@@ -126,8 +126,8 @@ function buildDashboardData(summary, rows) {
   ]
 
   const operations = [
-    { name: 'Retest passed', value: Math.min(100, Math.round(retestPassedRate)), tone: retestPassedCount > 0 ? 'ok' : 'neutral' },
-    { name: 'Retest failed', value: Math.min(100, Math.round(retestFailedRate)), tone: retestFailedCount > 0 ? 'warn' : 'neutral' },
+    { name: 'Retest passed', value: formatNumber(retestPassedCount), percentage: Math.round(retestPassedRate), tone: retestPassedCount > 0 ? 'ok' : 'neutral' },
+    { name: 'Retest failed', value: formatNumber(retestFailedCount), percentage: Math.round(retestFailedRate), tone: retestFailedCount > 0 ? 'warn' : 'neutral' },
   ]
 
   const channelMix = [
@@ -189,6 +189,7 @@ function buildDashboardData(summary, rows) {
     currentTrendStatus,
     channelMix,
     operations,
+    retestCount,
     totalRevenue: failedBoards,
     averageValue: passRate,
     highestValue: passedBoards,
@@ -543,14 +544,17 @@ function App() {
           </div>
 
           <div className="operations-list">
+            <div className="op-summary">
+              <strong>Total cards retested:</strong> {formatNumber(dashboardData.retestCount)}
+            </div>
             {dashboardData.operations.map((item) => (
               <div key={item.name} className="op-item">
                 <div className="op-row">
                   <span>{item.name}</span>
-                  <strong>{item.value}%</strong>
+                  <strong>{item.value} ({item.percentage}%)</strong>
                 </div>
                 <div className="op-bar">
-                  <span style={{ width: `${item.value}%` }} className={item.tone} />
+                  <span style={{ width: `${Math.min(100, item.percentage)}%` }} className={item.tone} />
                 </div>
               </div>
             ))}

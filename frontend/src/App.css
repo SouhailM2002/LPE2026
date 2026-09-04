@@ -864,6 +864,16 @@
   gap: 14px;
 }
 
+.op-summary {
+  padding: 12px;
+  background: #f0f9ff;
+  border: 1px solid #bfdbfe;
+  border-radius: 6px;
+  color: #0369a1;
+  font-size: 14px;
+  font-weight: 600;
+}
+
 .op-item {
   display: flex;
   flex-direction: column;
